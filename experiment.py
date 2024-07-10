@@ -37,6 +37,7 @@ from torchvision import transforms
 from torch.nn import functional as F
 
 import torchvision.utils as vutil
+import uuid
 
 from pathlib import Path
 from modelscope.msdatasets import MsDataset
@@ -87,15 +88,12 @@ class MsImageDataset(Dataset):
 
 class LocalVaeModel(torch.nn.Module):
 
-    def __init__(self, hidden_size=4, *args, **kwargs) -> None:
+    def __init__(self, hidden_size=16, mid_size=128, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.hidden_size = hidden_size
 
-        self.enc = Encoder(3, hidden_size,["DownEncoderBlock2D"]*4,[128]*4,double_z=True)
-
-        self.dec = Decoder(hidden_size,3,["UpDecoderBlock2D"]*4, [128]*4)
-
-
+        self.enc = Encoder(3, hidden_size,["DownEncoderBlock2D"]*4,[mid_size]*4,double_z=True)
+        self.dec = Decoder(hidden_size,3,["UpDecoderBlock2D"]*4, [mid_size]*4)
 
     def forward(self, batch_img: torch.Tensor) -> torch.Tensor:
         
@@ -128,126 +126,19 @@ logger = get_logger(__name__)
 def parse_args(input_args=None):
     parser = argparse.ArgumentParser(description="Simple example of a training script.")
     parser.add_argument(
-        "--pretrained_model_name_or_path",
-        type=str,
-        default="stabilityai/stable-diffusion-2-1-base",
-        help="Path to pretrained model or model identifier from huggingface.co/models.",
-    )
-    parser.add_argument(
-        "--pretrained_vae_name_or_path",
-        type=str,
-        default=None,
-        help="Path to pretrained vae or vae identifier from huggingface.co/models.",
-    )
-    parser.add_argument(
-        "--revision",
-        type=str,
-        default=None,
-        help="Revision of pretrained model identifier from huggingface.co/models.",
-    )
-    parser.add_argument(
-        "--tokenizer_name",
-        type=str,
-        default=None,
-        help="Pretrained tokenizer name or path if not the same as model_name",
-    )
-    parser.add_argument(
-        "--instance_data_dir",
-        type=str,
-        default="C://Users//Administrator//Pictures//test//miku",
-        help="A folder containing the training data of instance images.",
-    )
-    parser.add_argument(
-        "--class_data_dir",
-        type=str,
-        default=None,
-        required=False,
-        help="A folder containing the training data of class images.",
-    )
-    parser.add_argument(
-        "--instance_prompt",
-        type=str,
-        default="sexy Miku",
-        help="The prompt with identifier specifying the instance",
-    )
-    parser.add_argument(
-        "--class_prompt",
-        type=str,
-        default=None,
-        help="The prompt to specify images in the same class as provided instance images.",
-    )
-    parser.add_argument(
-        "--with_prior_preservation",
-        default=False,
-        action="store_true",
-        help="Flag to add prior preservation loss.",
-    )
-    parser.add_argument(
-        "--prior_loss_weight",
-        type=float,
-        default=1.0,
-        help="The weight of prior preservation loss.",
-    )
-    parser.add_argument(
-        "--num_class_images",
-        type=int,
-        default=100,
-        help=(
-            "Minimal class images for prior preservation loss. If not have enough images, additional images will be"
-            " sampled with class_prompt."
-        ),
-    )
-    parser.add_argument(
         "--output_dir",
         type=str,
         default="./output_example",
         help="The output directory where the model predictions and checkpoints will be written.",
     )
     parser.add_argument(
-        "--output_format",
-        type=str,
-        choices=["pt", "safe", "both"],
-        default="both",
-        help="The output format of the model predicitions and checkpoints.",
-    )
-    parser.add_argument(
         "--seed", type=int, default=None, help="A seed for reproducible training."
-    )
-    parser.add_argument(
-        "--resolution",
-        type=int,
-        default=128,
-        help=(
-            "The resolution for input images, all the images in the train/validation dataset will be resized to this"
-            " resolution"
-        ),
-    )
-    parser.add_argument(
-        "--center_crop",
-        action="store_true",
-        help="Whether to center crop images before resizing to resolution",
-    )
-    parser.add_argument(
-        "--color_jitter",
-        action="store_true",
-        help="Whether to apply color jitter to images",
-    )
-    parser.add_argument(
-        "--train_text_encoder",
-        action="store_true",
-        help="Whether to train the text encoder",
     )
     parser.add_argument(
         "--train_batch_size",
         type=int,
         default=1,
         help="Batch size (per device) for the training dataloader.",
-    )
-    parser.add_argument(
-        "--sample_batch_size",
-        type=int,
-        default=4,
-        help="Batch size (per device) for sampling images.",
     )
     parser.add_argument("--num_train_epochs", type=int, default=1)
     parser.add_argument(
@@ -259,7 +150,7 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--save_steps",
         type=int,
-        default=500,
+        default=1000,
         help="Save checkpoint every X updates steps.",
     )
     parser.add_argument(
@@ -269,27 +160,10 @@ def parse_args(input_args=None):
         help="Number of updates steps to accumulate before performing a backward/update pass.",
     )
     parser.add_argument(
-        "--gradient_checkpointing",
-        action="store_true",
-        help="Whether or not to use gradient checkpointing to save memory at the expense of slower backward pass.",
-    )
-    parser.add_argument(
-        "--lora_rank",
-        type=int,
-        default=4,
-        help="Rank of LoRA approximation.",
-    )
-    parser.add_argument(
         "--learning_rate",
         type=float,
         default=1e-4,
         help="Initial learning rate (after the potential warmup period) to use.",
-    )
-    parser.add_argument(
-        "--learning_rate_text",
-        type=float,
-        default=5e-6,
-        help="Initial learning rate for text encoder (after the potential warmup period) to use.",
     )
     parser.add_argument(
         "--scale_lr",
@@ -341,13 +215,6 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--max_grad_norm", default=1.0, type=float, help="Max gradient norm."
     )
-
-    parser.add_argument(
-        "--hub_token",
-        type=str,
-        default=None,
-        help="The token to use to push to the Model Hub.",
-    )
     parser.add_argument(
         "--logging_dir",
         type=str,
@@ -375,26 +242,14 @@ def parse_args(input_args=None):
         help="For distributed training: local_rank",
     )
     parser.add_argument(
-        "--resume_unet",
-        type=str,
-        default=None,
-        help=("File path for unet lora to resume training."),
+        "--hidden_size",
+        type=int,
+        default=4,
     )
     parser.add_argument(
-        "--resume_text_encoder",
-        type=str,
-        default=None,
-        help=("File path for text encoder lora to resume training."),
-    )
-    parser.add_argument(
-        "--resize",
-        type=bool,
-        default=True,
-        required=False,
-        help="Should images be resized to --resolution before training?",
-    )
-    parser.add_argument(
-        "--use_xformers", action="store_true", help="Whether or not to use xformers"
+        "--unet_mid_size",
+        type=int,
+        default=128,
     )
 
     if input_args is not None:
@@ -405,23 +260,9 @@ def parse_args(input_args=None):
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
     if env_local_rank != -1 and env_local_rank != args.local_rank:
         args.local_rank = env_local_rank
-
-    if args.with_prior_preservation:
-        if args.class_data_dir is None:
-            raise ValueError("You must specify a data directory for class images.")
-        if args.class_prompt is None:
-            raise ValueError("You must specify prompt for class images.")
-    else:
-        if args.class_data_dir is not None:
-            logger.warning(
-                "You need not use --class_data_dir without --with_prior_preservation."
-            )
-        if args.class_prompt is not None:
-            logger.warning(
-                "You need not use --class_prompt without --with_prior_preservation."
-            )
-
-    args.output_format = "pt"
+    if args.output_dir is None:
+        from datetime import datetime
+        args.output_dir = datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
 
     return args
 
@@ -445,7 +286,7 @@ def main(args):
         if args.output_dir is not None:
             os.makedirs(args.output_dir, exist_ok=True)
     
-    vae = LocalVaeModel()
+    vae = LocalVaeModel(hidden_size=args.hidden_size, mid_size=args.unet_mid_size)
     # from utils import TrainMonitor
     # tm = TrainMonitor()
     # tm.register_backward(vae.enc, "enc")
@@ -602,6 +443,10 @@ def main(args):
 
             if global_step >= args.max_train_steps:
                 break
+
+            if global_step % args.save_steps == 0:
+                if accelerator.is_main_process:
+                    torch.save(vae, args.output_dir + "/vae.pt")
 
     accelerator.wait_for_everyone()
 
