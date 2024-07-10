@@ -87,40 +87,13 @@ class MsImageDataset(Dataset):
 
 class LocalVaeModel(torch.nn.Module):
 
-    def __init__(self, hidden_size=16, *args, **kwargs) -> None:
+    def __init__(self, hidden_size=4, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.hidden_size = hidden_size
 
-        self.enc = Encoder(3, hidden_size,["DownEncoderBlock2D"]*4,[64]*4,double_z=False)
+        self.enc = Encoder(3, hidden_size,["DownEncoderBlock2D"]*4,[128]*4,double_z=True)
 
-        self.trans = ViTModel(
-            ViTConfig(
-            hidden_size=hidden_size, 
-            num_hidden_layers=4,
-            num_attention_heads=8,
-            intermediate_size=256,
-            image_size=32,
-            patch_size=1,
-            num_channels=hidden_size,
-            encoder_stride=1),
-            add_pooling_layer=False)
-
-        self.conv1 = torch.nn.Conv2d(hidden_size, hidden_size, 1)
-
-        self.trans_back = ViTModel(ViTConfig(
-            hidden_size=hidden_size, 
-            num_hidden_layers=4,
-            num_attention_heads=4,
-            intermediate_size=256,
-            image_size=32,
-            patch_size=1,
-            num_channels=hidden_size//2,
-            encoder_stride=1),
-            add_pooling_layer=False)
-
-        self.conv2 = torch.nn.Conv2d(hidden_size, hidden_size, 1)
-
-        self.dec = Decoder(hidden_size,3,["UpDecoderBlock2D"]*4, [64]*4)
+        self.dec = Decoder(hidden_size,3,["UpDecoderBlock2D"]*4, [128]*4)
 
 
 
@@ -134,29 +107,17 @@ class LocalVaeModel(torch.nn.Module):
                 .permute([0,4,1,2,3])\
                     .reshape([-1, 3, 8, 8])
 
-        # batch, patch_num, 32
-        batch_patch_hidden = self.enc(batch_patch)[:,:,0,0]\
-            .view([batch_size, patch_num, -1])\
-                .permute([0,2,1])\
-                    .view([batch_size, -1, 32, 32])
+        batch_patch_hidden = self.enc(batch_patch)
 
-        final_out = self.trans(batch_patch_hidden)['last_hidden_state'][:, 1:, :]\
-            .reshape([batch_size, 32, 32, -1])\
-                .permute([0,3,1,2])
-
-        final_out = self.conv1(final_out)
-
-        dist = DiagonalGaussianDistribution(final_out)
+        dist = DiagonalGaussianDistribution(batch_patch_hidden)
 
         sampled_z = dist.sample()
 
-        render_f = self.trans_back(sampled_z)['last_hidden_state'][:, 1:, :]\
-            .reshape([batch_size, 32, 32, -1])\
-                .permute([0,3,1,2])
+        rebuilt = self.dec(sampled_z)\
+            .reshape([batch_size, patch_num, -1])\
+                .permute([0,2,1])
 
-        render_f = self.conv2(render_f)
-
-        pixel = self.dec(render_f)
+        pixel = F.fold(rebuilt, 256, 8,stride=8)
 
         return pixel, dist.kl()
 
