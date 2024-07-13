@@ -86,6 +86,47 @@ class MsImageDataset(Dataset):
         return len(self.ms)
 
 
+def deploy(batch_patch, patch_size=32):
+    # batch*patch_size*patch_size, dim, 1, 1 -> batch, dim, patch_size, patch_size
+    bp = batch_patch.size()[0]
+    patch_num = patch_size*patch_size
+    batch_size = bp//patch_num
+    return batch_patch[:, :, 0, 0]\
+            .view([batch_size, patch_num, -1])\
+                .permute([0,2,1])\
+                    .view([batch_size, -1, patch_size, patch_size])
+
+def collect(hidden_img):
+    # batch, dim, patch_size, patch_size -> batch*patch_size*patch_size, dim, 1, 1
+    batch, dim, patch_size, _ = hidden_img.size()
+    patch_num = patch_size * patch_size
+    return hidden_img.view([batch, -1, patch_num])\
+        .permute([0,2,1])\
+            .view([batch*patch_num, -1, 1, 1])
+
+
+def img2patch(batch_img: torch.FloatTensor, kernel_size=8):
+    # batch, dim, w, h -> batch*(w//patch_size)*(h//patch_size), dim, patch_size, patch_size
+    batch, dim, w, h = batch_img.size()
+    assert w%kernel_size==0 and h%kernel_size==0
+    patch_num = (w//kernel_size) * (h//kernel_size)
+    fold = F.unfold(batch_img, kernel_size,1,0,kernel_size)
+    return fold.view([batch, dim,kernel_size,kernel_size,patch_num])\
+                .permute([0,4,1,2,3])\
+                    .reshape([-1, dim, kernel_size, kernel_size])
+
+
+def patch2img(patches: torch.FloatTensor, img_size=256):
+    # batch*(w//patch_size)*(h//patch_size), dim, kernel_size, kernel_size -> batch, dim, w, h
+    batch_patch, dim, kernel_size, _ = patches.size()
+    patch_size = img_size//kernel_size
+    patch_num = patch_size*patch_size
+    batch_size = batch_patch // patch_num
+    rebuilt = patches.reshape([batch_size, patch_num, -1])\
+                .permute([0,2,1])
+    return F.fold(rebuilt, img_size, kernel_size, stride=kernel_size)
+
+
 class LocalVaeModel(torch.nn.Module):
 
     def __init__(self, hidden_size=16, mid_size=128, *args, **kwargs) -> None:
@@ -93,29 +134,78 @@ class LocalVaeModel(torch.nn.Module):
         self.hidden_size = hidden_size
 
         self.enc = Encoder(3, hidden_size,["DownEncoderBlock2D"]*4,[mid_size]*4,double_z=True)
+
+        self.trans = ViTModel(
+            ViTConfig(
+            hidden_size=mid_size, 
+            num_hidden_layers=0,
+            num_attention_heads=1,
+            intermediate_size=mid_size*8,
+            image_size=32,
+            patch_size=1,
+            num_channels=hidden_size*2,
+            encoder_stride=1),
+            add_pooling_layer=False)
+
+        self.conv1 = torch.nn.Conv2d(mid_size, hidden_size*2, 1)
+
+        self.trans_back = ViTModel(ViTConfig(
+            hidden_size=mid_size, 
+            num_hidden_layers=0,
+            num_attention_heads=1,
+            intermediate_size=mid_size*8,
+            image_size=32,
+            patch_size=1,
+            num_channels=hidden_size,
+            encoder_stride=1),
+            add_pooling_layer=False)
+
+        self.conv2 = torch.nn.Conv2d(mid_size, hidden_size, 1)
+
         self.dec = Decoder(hidden_size,3,["UpDecoderBlock2D"]*4, [mid_size]*4)
 
     def forward(self, batch_img: torch.Tensor) -> torch.Tensor:
-        
-        batch_patch = F.unfold(batch_img, 8,1,0,8)
-        # F.fold(batch_patch, 256, 8,stride=8)
-        batch_size, _, patch_num = batch_patch.size()
-        batch_patch = batch_patch\
-            .view([batch_size, 3,8,8,patch_num])\
-                .permute([0,4,1,2,3])\
-                    .reshape([-1, 3, 8, 8])
 
+        batch_size = batch_img.size()[0]
+
+        # batch, dim, img_size, img_size -> batch * patch_num, dim, patch_size, patch_size
+        batch_patch = img2patch(batch_img)
+
+        # batch * patch_num, hidden_size*2, 1, 1
         batch_patch_hidden = self.enc(batch_patch)
+        
+        # batch, hidden_size*2, patch_size, patch_size
+        hidden_img = deploy(batch_patch_hidden)
 
-        dist = DiagonalGaussianDistribution(batch_patch_hidden)
+        # batch, mid_size, patch_size, patch_size
+        final_out = self.trans(hidden_img,output_hidden_states=True)['hidden_states'][0][:, 1:, :]\
+            .permute([0,2,1])\
+                .reshape([batch_size, -1, 32, 32])
 
-        sampled_z = dist.sample()
+        # batch, hidden_size*2, patch_size, patch_size
+        final_out = self.conv1(final_out)
+   
 
-        rebuilt = self.dec(sampled_z)\
-            .reshape([batch_size, patch_num, -1])\
-                .permute([0,2,1])
+        dist = DiagonalGaussianDistribution(collect(final_out))
 
-        pixel = F.fold(rebuilt, 256, 8,stride=8)
+        # batch, hidden_size, 32, 32
+        sampled_z = deploy(dist.sample())
+
+        # batch, mid_size, 32, 32
+        render_f = self.trans_back(sampled_z,output_hidden_states=True)['hidden_states'][0][:, 1:, :]\
+            .permute([0,2,1])\
+                .reshape([batch_size, -1, 32, 32])
+
+        # batch, hidden_size, 32, 32
+        render_f = self.conv2(render_f)
+        
+        # batch*patch_num, hidden_size, 1, 1
+        render_f = collect(sampled_z)
+
+        # render_f = sampled_z
+        rebuilt = self.dec(render_f)\
+
+        pixel = patch2img(rebuilt)
 
         return pixel, dist.kl()
 
@@ -128,7 +218,7 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="./output_example",
+        default=None,
         help="The output directory where the model predictions and checkpoints will be written.",
     )
     parser.add_argument(
@@ -137,7 +227,7 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--train_batch_size",
         type=int,
-        default=1,
+        default=2,
         help="Batch size (per device) for the training dataloader.",
     )
     parser.add_argument("--num_train_epochs", type=int, default=1)
@@ -244,7 +334,7 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--hidden_size",
         type=int,
-        default=4,
+        default=8,
     )
     parser.add_argument(
         "--unet_mid_size",
@@ -262,7 +352,7 @@ def parse_args(input_args=None):
         args.local_rank = env_local_rank
     if args.output_dir is None:
         from datetime import datetime
-        args.output_dir = datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
+        args.output_dir = "output_"+datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
 
     return args
 

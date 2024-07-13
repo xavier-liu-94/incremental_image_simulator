@@ -4,4 +4,6 @@ MODELSCOPE_CACHE=/media/xavier/Samsumg/.cache/modelscope/hub accelerate launch e
     --learning_rate=1e-4 \
     --lr_scheduler="constant" \
     --lr_warmup_steps=0 \
-    --max_train_steps=30000 
+    --max_train_steps=30000 \
+    --hidden_size=4 \
+    --unet_mid_size=128
