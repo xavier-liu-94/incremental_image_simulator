@@ -186,10 +186,10 @@ class LocalVaeModel(torch.nn.Module):
         final_out = self.conv1(final_out)
    
 
-        dist = DiagonalGaussianDistribution(collect(final_out))
+        dist = DiagonalGaussianDistribution(final_out)
 
         # batch, hidden_size, 32, 32
-        sampled_z = deploy(dist.sample())
+        sampled_z = dist.sample()
 
         # batch, mid_size, 32, 32
         render_f = self.trans_back(sampled_z,output_hidden_states=True)['hidden_states'][0][:, 1:, :]\
@@ -340,6 +340,11 @@ def parse_args(input_args=None):
         "--unet_mid_size",
         type=int,
         default=128,
+    )
+    parser.add_argument(
+        "--kl_weight",
+        type=float,
+        default=0.0000025,
     )
 
     if input_args is not None:
@@ -507,8 +512,9 @@ def main(args):
 
             model_pred, kl_loss = vae(batch)
 
-            loss = F.mse_loss(model_pred.float(), batch.float(), reduction="mean") + \
-                0.00025 * torch.mean(kl_loss)
+            loss_recon = F.mse_loss(model_pred.float(), batch.float(), reduction="mean")
+            loss_kl = args.kl_weight * torch.mean(kl_loss)
+            loss = loss_recon + loss_kl
 
             accelerator.backward(loss)
             if accelerator.sync_gradients:
@@ -520,7 +526,10 @@ def main(args):
 
             global_step += 1
 
-            logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
+            logs = {
+                "loss_recon": loss_recon.detach().item(),
+                "loss_kl": loss_kl.detach().item(),
+                 "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
             # info_dict = tm.infos
             accelerator.log(logs, step=global_step)
